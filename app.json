@@ -1,0 +1,55 @@
+{
+  "configVersion": "v2",
+  "app": {
+    "appId": 662601,
+    "appName": "TAO监控",
+    "appType": "app",
+    "version": {
+      "code": 8,
+      "name": "1.0.8"
+    },
+    "icon": "icon.png",
+    "vender": "nhg",
+    "description": "Bittensor coldkey 每日余额提醒 (finney 主网)"
+  },
+  "permissions": [],
+  "runtime": {
+    "apiVersion": {
+      "compatible": "1.0.0",
+      "target": "1.0.1",
+      "minVersion": "1.0.0"
+    }
+  },
+  "targets": {
+    "common": {
+      "module": {
+        "page": {
+          "pages": ["pages/index"]
+        },
+        "app-side": {
+          "path": "app-side/index"
+        }
+      },
+      "platforms": [
+        {
+          "name": "gts3",
+          "deviceSource": 224
+        },
+        {
+          "name": "gts3-w",
+          "deviceSource": 225
+        }
+      ],
+      "designWidth": 390
+    }
+  },
+  "i18n": {
+    "en-US": {
+      "appName": "TAO Monitor"
+    },
+    "zh-CN": {
+      "appName": "TAO监控"
+    }
+  },
+  "defaultLanguage": "zh-CN"
+}

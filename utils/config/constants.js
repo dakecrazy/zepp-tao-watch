@@ -1,0 +1,9 @@
+export const COLOR_BG = 0x000000;
+export const COLOR_TITLE = 0x8a8a8a;
+export const COLOR_MAIN = 0x00e5ff;
+export const COLOR_TEXT = 0xffffff;
+export const COLOR_DIM = 0x9e9e9e;
+export const COLOR_ERR = 0xff5252;
+export const COLOR_OK = 0x69f0ae;
+export const COLOR_BTN = 0x1c1c1e;
+export const COLOR_BTN_PRESS = 0x333338;
