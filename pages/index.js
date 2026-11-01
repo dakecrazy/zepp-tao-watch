@@ -13,8 +13,8 @@ import { NETUID } from "../shared/constants.gen";
 
 const { messageBuilder, appId, wakeParam } = getApp()._options.globalData;
 
-// 桥默认 60s 超时太久, 统一 15s 快速反馈
-const BRIDGE_TIMEOUT = 15000;
+// 桥超时: 30s (冷启动唤起 Side Service + 手机侧首次建连可能 >15s)
+const BRIDGE_TIMEOUT = 30000;
 
 function req(payload) {
   return messageBuilder.request(payload, { timeout: BRIDGE_TIMEOUT });
@@ -35,7 +35,7 @@ function bridgeErr(e) {
   return "桥:" + m.substr(0, 55);
 }
 
-// ---------- 每日提醒: 闹钟链 (1.0 无持久闹钟, 唤醒后自我续挂) ----------
+// ---------- 每日提醒: 闹钟链 (维护在手表端自主完成, 不依赖手机回答) ----------
 let alarmId = 0;
 
 function nextNineUtc() {
@@ -54,6 +54,8 @@ function nextNineUtc() {
   }
 }
 
+// 挂闹钟并检查返回值 (alarmNew 失败返回 0, 不检查就是盲报成功)
+// url/file 两个键都发: 1.0 文档示例用 file, option 表写 url, 固件行为未知
 function armDaily(enabled) {
   if (alarmId) {
     try {
@@ -61,18 +63,18 @@ function armDaily(enabled) {
     } catch (e) {}
     alarmId = 0;
   }
-  if (enabled) {
-    const t = nextNineUtc();
-    if (t > 0) {
-      alarmId = hmApp.alarmNew({
-        appid: appId,
-        url: "pages/index",
-        date: t,
-        param: "daily",
-      });
-      console.log("alarm armed id=" + alarmId + " at " + t);
-    }
-  }
+  if (!enabled) return true;
+  const t = nextNineUtc();
+  if (t <= 0) return false;
+  alarmId = hmApp.alarmNew({
+    appid: appId,
+    url: "pages/index",
+    file: "pages/index",
+    date: t,
+    param: "daily",
+  });
+  console.log("alarmNew id=" + alarmId + " @" + t);
+  return alarmId > 0;
 }
 
 Page({
@@ -120,30 +122,34 @@ Page({
       this.renderBig();
     });
 
-    // 1.0 的 BUTTON 不支持 setProperty 更新文字 → 删除重建 (标签变化唯一可靠途径)
+    // 1.0 的 BUTTON 不支持 setProperty 更新文字 → 删除重建
     this.btnCfg = {
-      refresh: { x: 15, y: 318, w: 170, h: 70, size: 28, click: () => this.refresh() },
+      refresh: { x: 15, y: 318, w: 170, h: 70, size: 28, click: () => this.refresh(false) },
       daily: { x: 205, y: 318, w: 170, h: 70, size: 26, click: () => this.toggleDaily() },
     };
     this.mkBtn("refresh", "刷新");
     this.mkBtn("daily", "提醒 ?");
 
-    // 串行: 缓存→刷新→提醒状态, 降低对桥的并发压力
-    const chain =
-      wakeParam === "daily"
-        ? this.refresh()
-            .then(() => this.syncDaily())
-            .then(() => {
-              setTimeout(() => {
-                try {
-                  hmApp.exit();
-                } catch (e) {}
-              }, 3000);
-            })
-        : this.renderLast()
-            .then(() => this.refresh())
-            .then(() => this.syncDaily());
-    chain.catch((e) => console.log("chain " + e));
+    if (wakeParam === "daily") {
+      // 闹钟唤醒: 先无条件续链(不依赖手机回答), 再拉数据, 手机明确说"关"才撤
+      armDaily(true);
+      this.refresh(false)
+        .then(() => this.syncDaily(true))
+        .then(() => {
+          setTimeout(() => {
+            try {
+              hmApp.exit();
+            } catch (e) {}
+          }, 3000);
+        })
+        .catch(() => {});
+    } else {
+      // 手动打开: 最便宜的 GET_DAILY 先暖桥, 再缓存, 再重拉
+      this.syncDaily(false)
+        .then(() => this.renderLast())
+        .then(() => this.refresh(false))
+        .catch(() => {});
+    }
   },
 
   mkBtn(key, text) {
@@ -228,7 +234,7 @@ Page({
       .catch((e) => console.log("GET_LAST fail " + e));
   },
 
-  refresh() {
+  refresh(isRetry) {
     setW(this.txt.status, { color: COLOR_DIM, text: "拉取链上…" });
     return req({ method: "GET_DATA" })
       .then((resp) => {
@@ -239,19 +245,48 @@ Page({
           this.renderData(null, null, (resp && resp.error) || "未知");
         }
       })
-      .catch((e) => this.renderData(null, null, bridgeErr(e)));
+      .catch((e) => {
+        const m = String(e);
+        // 桥超时自动重试一次 (把"第二次点击"自动化), 只重试一次防打转
+        if (!isRetry && m.indexOf("Timed out") >= 0) {
+          setW(this.txt.status, { color: COLOR_DIM, text: "桥忙·自动重试…" });
+          setTimeout(() => {
+            try {
+              this.refresh(true);
+            } catch (e2) {}
+          }, 1500);
+          return;
+        }
+        this.renderData(null, null, bridgeErr(e));
+      });
   },
 
-  syncDaily() {
+  // inWake=true: 闹钟唤醒场景 — 手机明确说"关"才撤链, 手机不在/超时一律保持续挂
+  syncDaily(inWake) {
     return req({ method: "GET_DAILY" })
       .then((resp) => {
-        const on = resp && resp.enabled;
-        this.state.daily = !!on;
-        if (on) armDaily(true); // 保持闹钟链
-        this.mkBtn("daily", on ? "提醒 ✓" : "提醒 ×");
+        if (!resp || !resp.ok) throw Error("bad resp");
+        const on = !!resp.enabled;
+        this.state.daily = on;
+        if (inWake && !on) {
+          // 用户已关闭: 撤掉刚续的闹钟, 链到此为止
+          if (alarmId) {
+            try {
+              hmApp.alarmCancel(alarmId);
+            } catch (e) {}
+            alarmId = 0;
+          }
+          setW(this.txt.status, { color: COLOR_DIM, text: "提醒已关闭" });
+        } else {
+          if (!inWake && on) armDaily(true); // 手动路径保持闹钟链
+          this.mkBtn("daily", on ? "提醒 ✓" : "提醒 ×");
+        }
       })
       .catch((e) => {
-        setW(this.txt.status, { color: COLOR_ERR, text: bridgeErr(e) });
+        // 状态未知: 手动路径按钮保持"?"(诚实), 闹钟唤醒路径已无条件续挂
+        if (!inWake) {
+          setW(this.txt.status, { color: COLOR_ERR, text: bridgeErr(e) });
+        }
       });
   },
 
@@ -261,13 +296,17 @@ Page({
       .then((resp) => {
         if (resp && resp.ok) {
           this.state.daily = next;
-          armDaily(next);
+          const ok = armDaily(next);
           this.mkBtn("daily", next ? "提醒 ✓" : "提醒 ×");
           if (next) {
-            setW(this.txt.status, {
-              color: COLOR_OK,
-              text: "每日09:00已挂闹钟",
-            });
+            setW(
+              this.txt.status,
+              ok
+                ? { color: COLOR_OK, text: "每日09:00已挂闹钟" }
+                : { color: COLOR_ERR, text: "闹钟创建失败(id=0)" }
+            );
+          } else {
+            setW(this.txt.status, { color: COLOR_DIM, text: "已关闭" });
           }
         } else {
           setW(this.txt.status, { color: COLOR_ERR, text: "开关失败" });
