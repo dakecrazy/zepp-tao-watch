@@ -35,39 +35,90 @@ function bridgeErr(e) {
   return "桥:" + m.substr(0, 55);
 }
 
-// ---------- 提醒开关: 手表本地文件 (hmFS), 手机侧存储隔夜易丢, 不再作为状态源 ----------
+// ---------- 提醒开关: 分层持久化 ----------
+// 第1层 hmFS 文件 (跨手表重启); 第2层 hmFS.SysPro 布尔 (跨 Zepp App worker 重启, 重启手表清空)
+// 手机侧存储已证实隔夜易丢, 不再使用
 const FLAG_PATH = "tao_daily_flag";
+const SYS_KEY = "tao_daily_enabled";
 
-// 返回 true/false/null(从未写入或读取失败)
+// 返回 true/false/null(两层都读不到)
 function flagRead() {
+  // 1) 文件
   try {
     const fd = hmFS.open(FLAG_PATH, hmFS.O_RDWR | hmFS.O_CREAT);
-    if (!fd) return null;
-    const buf = new Uint8Array(1);
-    const r = hmFS.read(fd, buf.buffer, 0, 1);
-    hmFS.close(fd);
-    if (r !== 0) return null;
-    if (buf[0] === 49) return true; // '1'
-    if (buf[0] === 48) return false; // '0'
-    return null;
+    console.log("flagRead open fd=" + fd);
+    if (fd && fd > 0) {
+      const buf = new Uint8Array(1);
+      const r = hmFS.read(fd, buf.buffer, 0, 1);
+      hmFS.close(fd);
+      console.log("flagRead r=" + r + " b=" + buf[0]);
+      if (r === 0) {
+        if (buf[0] === 49) return true;
+        if (buf[0] === 48) return false;
+      }
+    }
   } catch (e) {
-    console.log("flagRead " + e);
-    return null;
+    console.log("flagRead file err " + e);
   }
+  // 2) SysPro
+  try {
+    if (typeof hmFS.SysProGetBool === "function") {
+      const v = hmFS.SysProGetBool(SYS_KEY);
+      console.log("flagRead syspro=" + v);
+      if (v === true) return true;
+      if (v === false) return false;
+    }
+  } catch (e) {
+    console.log("flagRead syspro err " + e);
+  }
+  return null;
 }
 
+// 返回 { fileOK, sysOK }
 function flagWrite(on) {
+  let fileOK = false;
+  let sysOK = false;
   try {
-    const fd = hmFS.open(FLAG_PATH, hmFS.O_WRONLY | hmFS.O_CREAT | hmFS.O_TRUNC);
-    if (!fd) return false;
-    const buf = new Uint8Array([on ? 49 : 48]);
-    const r = hmFS.write(fd, buf.buffer, 0, 1);
-    hmFS.close(fd);
-    return r === 0;
-  } catch (e) {
-    console.log("flagWrite " + e);
-    return false;
+    console.log(
+      "O_WRONLY=" + hmFS.O_WRONLY + " O_RDWR=" + hmFS.O_RDWR +
+      " O_CREAT=" + hmFS.O_CREAT + " O_TRUNC=" + hmFS.O_TRUNC
+    );
+  } catch (e) {}
+  // 文件: 两种 flag 组合都试 (常量缺失时组合会退化)
+  const tries = [];
+  try {
+    tries.push(hmFS.O_WRONLY | hmFS.O_CREAT | hmFS.O_TRUNC);
+    tries.push(hmFS.O_RDWR | hmFS.O_CREAT);
+  } catch (e) {}
+  tries.push(2 | 64 | 512); // POSIX 数值兜底: O_RDWR|O_CREAT|O_TRUNC
+  for (const fl of tries) {
+    try {
+      const fd = hmFS.open(FLAG_PATH, fl);
+      console.log("flagWrite open(" + fl + ") fd=" + fd);
+      if (fd && fd > 0) {
+        const buf = new Uint8Array([on ? 49 : 48]);
+        const r = hmFS.write(fd, buf.buffer, 0, 1);
+        hmFS.close(fd);
+        console.log("flagWrite r=" + r);
+        if (r === 0) {
+          fileOK = true;
+          break;
+        }
+      }
+    } catch (e) {
+      console.log("flagWrite try err " + e);
+    }
   }
+  try {
+    if (typeof hmFS.SysProSetBool === "function") {
+      const r = hmFS.SysProSetBool(SYS_KEY, on);
+      sysOK = r === 0;
+      console.log("flagWrite syspro r=" + r);
+    }
+  } catch (e) {
+    console.log("flagWrite syspro err " + e);
+  }
+  return { fileOK: fileOK, sysOK: sysOK };
 }
 
 // ---------- 每日提醒: 闹钟链 (维护在手表端, 状态在手表文件, 均不依赖手机) ----------
@@ -292,9 +343,9 @@ Page({
   },
 
   toggleDaily() {
-    // 开关真值 = 手表本地文件
+    // 开关真值 = 手表分层持久化 (文件 > SysPro)
     const next = !(flagRead() === true);
-    const saved = flagWrite(next);
+    const res = flagWrite(next);
     const ok = armDaily(next);
     this.state.daily = next;
     this.mkBtn("daily", next ? "提醒 ✓" : "提醒 ×");
@@ -303,14 +354,16 @@ Page({
         this.txt.status,
         !ok
           ? { color: COLOR_ERR, text: "闹钟创建失败(id=0)" }
-          : saved
+          : res.fileOK
             ? { color: COLOR_OK, text: "每日09:00已挂闹钟" }
-            : { color: COLOR_OK, text: "已挂闹钟·本地保存失败" }
+            : res.sysOK
+              ? { color: COLOR_ERR, text: "已挂闹钟·重启手表后需重开" }
+              : { color: COLOR_ERR, text: "已挂闹钟·状态未能保存" }
       );
     } else {
       setW(
         this.txt.status,
-        saved
+        res.fileOK || res.sysOK
           ? { color: COLOR_DIM, text: "已关闭" }
           : { color: COLOR_ERR, text: "已取消闹钟·保存失败" }
       );
