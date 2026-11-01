@@ -13,11 +13,11 @@ import { NETUID } from "../shared/constants.gen";
 
 const { messageBuilder, appId, wakeParam } = getApp()._options.globalData;
 
-// 桥超时: 30s (冷启动唤起 Side Service + 手机侧首次建连可能 >15s)
-const BRIDGE_TIMEOUT = 30000;
+// GET_DATA 冷启动(唤起 Side Service + 手机侧首次建连)给足 60s + 一次自动重试
+const DATA_TIMEOUT = 60000;
 
-function req(payload) {
-  return messageBuilder.request(payload, { timeout: BRIDGE_TIMEOUT });
+function req(payload, timeout) {
+  return messageBuilder.request(payload, { timeout: timeout || DATA_TIMEOUT });
 }
 
 // 1.0 更新 widget 唯一正解: setProperty(hmUI.prop.MORE, {...}); 字符串属性名静默失效
@@ -35,7 +35,42 @@ function bridgeErr(e) {
   return "桥:" + m.substr(0, 55);
 }
 
-// ---------- 每日提醒: 闹钟链 (维护在手表端自主完成, 不依赖手机回答) ----------
+// ---------- 提醒开关: 手表本地文件 (hmFS), 手机侧存储隔夜易丢, 不再作为状态源 ----------
+const FLAG_PATH = "tao_daily_flag";
+
+// 返回 true/false/null(从未写入或读取失败)
+function flagRead() {
+  try {
+    const fd = hmFS.open(FLAG_PATH, hmFS.O_RDWR | hmFS.O_CREAT);
+    if (!fd) return null;
+    const buf = new Uint8Array(1);
+    const r = hmFS.read(fd, buf.buffer, 0, 1);
+    hmFS.close(fd);
+    if (r !== 0) return null;
+    if (buf[0] === 49) return true; // '1'
+    if (buf[0] === 48) return false; // '0'
+    return null;
+  } catch (e) {
+    console.log("flagRead " + e);
+    return null;
+  }
+}
+
+function flagWrite(on) {
+  try {
+    const fd = hmFS.open(FLAG_PATH, hmFS.O_WRONLY | hmFS.O_CREAT | hmFS.O_TRUNC);
+    if (!fd) return false;
+    const buf = new Uint8Array([on ? 49 : 48]);
+    const r = hmFS.write(fd, buf.buffer, 0, 1);
+    hmFS.close(fd);
+    return r === 0;
+  } catch (e) {
+    console.log("flagWrite " + e);
+    return false;
+  }
+}
+
+// ---------- 每日提醒: 闹钟链 (维护在手表端, 状态在手表文件, 均不依赖手机) ----------
 let alarmId = 0;
 
 function nextNineUtc() {
@@ -112,7 +147,7 @@ Page({
         x: 0, y: 238, w: W, h: 30,
         color: COLOR_DIM, text_size: 20,
         align_h: hmUI.align.CENTER_H,
-        text: "读取缓存…",
+        text: "",
       }),
     };
 
@@ -127,14 +162,20 @@ Page({
       refresh: { x: 15, y: 318, w: 170, h: 70, size: 28, click: () => this.refresh(false) },
       daily: { x: 205, y: 318, w: 170, h: 70, size: 26, click: () => this.toggleDaily() },
     };
+
+    // 开关状态 = 手表本地文件, 即时显示, 不发任何请求、不再出现"?"
+    const f = flagRead();
+    this.state.daily = f === true;
     this.mkBtn("refresh", "刷新");
-    this.mkBtn("daily", "提醒 ?");
+    this.mkBtn(
+      "daily",
+      f === true ? "提醒 ✓" : f === false ? "提醒 ×" : "提醒 ?"
+    );
 
     if (wakeParam === "daily") {
-      // 闹钟唤醒: 先无条件续链(不依赖手机回答), 再拉数据, 手机明确说"关"才撤
-      armDaily(true);
+      // 闹钟唤醒: 文件明确为"关"才不续; 其余(含读取失败)一律续挂 — 链自持不依赖手机
+      if (f !== false) armDaily(true);
       this.refresh(false)
-        .then(() => this.syncDaily(true))
         .then(() => {
           setTimeout(() => {
             try {
@@ -144,11 +185,8 @@ Page({
         })
         .catch(() => {});
     } else {
-      // 手动打开: 最便宜的 GET_DAILY 先暖桥, 再缓存, 再重拉
-      this.syncDaily(false)
-        .then(() => this.renderLast())
-        .then(() => this.refresh(false))
-        .catch(() => {});
+      // 手动打开: 直接拉最新数据 (失败时手机侧回包自带缓存)
+      this.refresh(false).catch(() => {});
     }
   },
 
@@ -226,17 +264,9 @@ Page({
     }
   },
 
-  renderLast() {
-    return req({ method: "GET_LAST" })
-      .then((resp) => {
-        if (resp && resp.ok && resp.data) this.renderData(resp.data, "缓存");
-      })
-      .catch((e) => console.log("GET_LAST fail " + e));
-  },
-
   refresh(isRetry) {
     setW(this.txt.status, { color: COLOR_DIM, text: "拉取链上…" });
-    return req({ method: "GET_DATA" })
+    return req({ method: "GET_DATA" }, DATA_TIMEOUT)
       .then((resp) => {
         if (resp && resp.ok) {
           this.renderData(resp.data, "实时");
@@ -247,7 +277,7 @@ Page({
       })
       .catch((e) => {
         const m = String(e);
-        // 桥超时自动重试一次 (把"第二次点击"自动化), 只重试一次防打转
+        // 桥超时自动重试一次 (冷启动第二击自动化), 只重试一次防打转
         if (!isRetry && m.indexOf("Timed out") >= 0) {
           setW(this.txt.status, { color: COLOR_DIM, text: "桥忙·自动重试…" });
           setTimeout(() => {
@@ -261,59 +291,29 @@ Page({
       });
   },
 
-  // inWake=true: 闹钟唤醒场景 — 手机明确说"关"才撤链, 手机不在/超时一律保持续挂
-  syncDaily(inWake) {
-    return req({ method: "GET_DAILY" })
-      .then((resp) => {
-        if (!resp || !resp.ok) throw Error("bad resp");
-        const on = !!resp.enabled;
-        this.state.daily = on;
-        if (inWake && !on) {
-          // 用户已关闭: 撤掉刚续的闹钟, 链到此为止
-          if (alarmId) {
-            try {
-              hmApp.alarmCancel(alarmId);
-            } catch (e) {}
-            alarmId = 0;
-          }
-          setW(this.txt.status, { color: COLOR_DIM, text: "提醒已关闭" });
-        } else {
-          if (!inWake && on) armDaily(true); // 手动路径保持闹钟链
-          this.mkBtn("daily", on ? "提醒 ✓" : "提醒 ×");
-        }
-      })
-      .catch((e) => {
-        // 状态未知: 手动路径按钮保持"?"(诚实), 闹钟唤醒路径已无条件续挂
-        if (!inWake) {
-          setW(this.txt.status, { color: COLOR_ERR, text: bridgeErr(e) });
-        }
-      });
-  },
-
   toggleDaily() {
-    const next = !this.state.daily;
-    req({ method: "SET_DAILY", enabled: next })
-      .then((resp) => {
-        if (resp && resp.ok) {
-          this.state.daily = next;
-          const ok = armDaily(next);
-          this.mkBtn("daily", next ? "提醒 ✓" : "提醒 ×");
-          if (next) {
-            setW(
-              this.txt.status,
-              ok
-                ? { color: COLOR_OK, text: "每日09:00已挂闹钟" }
-                : { color: COLOR_ERR, text: "闹钟创建失败(id=0)" }
-            );
-          } else {
-            setW(this.txt.status, { color: COLOR_DIM, text: "已关闭" });
-          }
-        } else {
-          setW(this.txt.status, { color: COLOR_ERR, text: "开关失败" });
-        }
-      })
-      .catch((e) => {
-        setW(this.txt.status, { color: COLOR_ERR, text: bridgeErr(e) });
-      });
+    // 开关真值 = 手表本地文件
+    const next = !(flagRead() === true);
+    const saved = flagWrite(next);
+    const ok = armDaily(next);
+    this.state.daily = next;
+    this.mkBtn("daily", next ? "提醒 ✓" : "提醒 ×");
+    if (next) {
+      setW(
+        this.txt.status,
+        !ok
+          ? { color: COLOR_ERR, text: "闹钟创建失败(id=0)" }
+          : saved
+            ? { color: COLOR_OK, text: "每日09:00已挂闹钟" }
+            : { color: COLOR_OK, text: "已挂闹钟·本地保存失败" }
+      );
+    } else {
+      setW(
+        this.txt.status,
+        saved
+          ? { color: COLOR_DIM, text: "已关闭" }
+          : { color: COLOR_ERR, text: "已取消闹钟·保存失败" }
+      );
+    }
   },
 });
