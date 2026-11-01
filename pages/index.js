@@ -100,7 +100,8 @@ function flagWrite(on) {
         const r = hmFS.write(fd, buf.buffer, 0, 1);
         hmFS.close(fd);
         console.log("flagWrite r=" + r);
-        if (r === 0) {
+        // 真机语义: write 返回写入字节数 (r=1 即成功); 文档"0=成功"与实测不符
+        if (r >= 1) {
           fileOK = true;
           break;
         }
@@ -125,19 +126,26 @@ function flagWrite(on) {
 let alarmId = 0;
 
 function nextNineUtc() {
+  // 先按秒算; 若底层 utc 是毫秒会导致结果为13位数, 用当前秒数归一化兜底
+  let nowSec = 0;
   try {
-    const t = hmSensor.createSensor(hmSensor.id.TIME);
-    const tzOff = t.hour * 3600 + t.minute * 60 - (t.utc % 86400);
-    let base = Math.floor((t.utc + tzOff) / 86400) * 86400 + 9 * 3600 - tzOff;
-    if (base <= t.utc + 30) base += 86400;
-    return base;
+    nowSec = Math.floor(Date.now() / 1000);
+  } catch (e) {}
+  let t = 0;
+  try {
+    const tz = hmSensor.createSensor(hmSensor.id.TIME);
+    const tzOff = tz.hour * 3600 + tz.minute * 60 - (tz.utc % 86400);
+    t = Math.floor((tz.utc + tzOff) / 86400) * 86400 + 9 * 3600 - tzOff;
+    // 兼容毫秒型 utc: 除到秒级 (tz.utc 为 ms 时 t 会是 13 位数)
+    while (t > nowSec + 90000 && t > 1e11) t = Math.floor(t / 1000);
   } catch (e) {
-    try {
-      return Math.floor(Date.now() / 1000) + 86400;
-    } catch (e2) {
-      return 0;
-    }
+    t = 0;
   }
+  // 最终夹紧: 必须是未来 24h 内的秒级时间戳, 否则退回"现在+24h"
+  if (nowSec > 0 && (t < nowSec + 60 || t > nowSec + 200000)) {
+    t = nowSec + 86400;
+  }
+  return t;
 }
 
 // 挂闹钟并检查返回值 (alarmNew 失败返回 0, 不检查就是盲报成功)
@@ -160,7 +168,12 @@ function armDaily(enabled) {
     param: "daily",
   });
   console.log("alarmNew id=" + alarmId + " @" + t);
-  return alarmId > 0;
+  // 失败形态: 0 或 0xFFFFFFFF(=-1 的无符号表示)
+  if (alarmId === 0 || alarmId >= 4294967290) {
+    alarmId = 0;
+    return false;
+  }
+  return true;
 }
 
 Page({
