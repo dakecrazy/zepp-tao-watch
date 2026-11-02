@@ -432,9 +432,17 @@ Page({
   renderData(d, source, err) {
     if (d) {
       this.state.last = d;
+      // 七路并行里个别 RPC 失败时(状态行会标"质押X/价格X"), 用缓存补齐缺失字段,
+      // 避免 ok:true 但大数字"--"或 $ 行消失
+      const c = cacheLoad();
+      if (c) {
+        if (d.taoValue == null && c.taoValue != null) d.taoValue = c.taoValue;
+        if (!d.price && c.price) d.price = c.price;
+        if (!d.poolPrice && c.poolPrice) d.poolPrice = c.poolPrice;
+      }
       this.renderBig();
       if (source === "实时") {
-        // 成功拉到实时数据 → 存手表缓存
+        // 成功拉到实时数据 → 存手表缓存(含补齐后的完整字段)
         cacheSave(d);
         setW(this.txt.status, {
           color: COLOR_OK,
