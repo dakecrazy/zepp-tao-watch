@@ -246,8 +246,7 @@ function fmtCacheTime(ts) {
 // ---------- 震动提醒 ----------
 let vibrate = null;
 
-// scene 9 = 高强度四连震(1200ms); 不用 setTimeout 延迟——唤醒场景下定时器回调疑似不执行
-// (v1.1.4~1.1.8 的 vib 日志从未出现, 而 buzz 之后的 alarmNew 日志正常), 改为同步直调
+// scene 0 = 两短震 (同手表消息通知); 唤醒会话定时器全灭, 必须同步直调 (v1.2.2 实测有效)
 function buzz() {
   try {
     console.log("vib id=" + hmSensor.id.VIBRATE);
@@ -258,12 +257,18 @@ function buzz() {
     try {
       vibrate.stop();
     } catch (e) {}
-    vibrate.scene = 9;
+    vibrate.scene = 0;
     vibrate.start();
-    console.log("vib start scene=9");
+    console.log("vib start scene=0");
   } catch (e) {
     console.log("vibrate err " + e);
   }
+}
+
+// 唤醒会话定时器全灭: 延时只能忙等(阻塞式; 调用时页面已渲染完毕, 无其他任务)
+function busyWaitMs(ms) {
+  const start = Date.now();
+  while (Date.now() - start < ms) {}
 }
 
 // 挂/撤每日闹钟主链, 返回 {ok, delaySec}
@@ -341,11 +346,9 @@ Page({
       f === true ? "提醒 ✓" : f === false ? "提醒 ×" : "提醒 ?"
     );
 
-    if (wakeParam === "daily" || wakeParam === "test") {
-      // 闹钟唤醒: 先渲染缓存和震动(保证可见), 再续挂主链, 最后拉实时
-      // 实测铁律: 唤醒会话里 setTimeout 回调不执行(定时器全灭) → 不做自动退出,
-      // 余额停屏等用户看完手动划走; 所有必须执行的逻辑一律同步直调
-      const isTest = wakeParam === "test";
+    if (wakeParam === "daily") {
+      // 闹钟唤醒: 秒显缓存 → 震两下 → 续挂主链 → 拉实时 → 停屏15s → 退出
+      // (唤醒会话定时器全灭: 延时用忙等, 关键逻辑全部同步直调)
       this.showCache();
       buzz();
       try {
@@ -354,13 +357,12 @@ Page({
         console.log("rearm threw " + e);
       }
       this.fetchWithRetry(2, 8000).then(() => {
-        if (isTest) {
-          setW(this.txt.status, {
-            color: COLOR_OK,
-            text: "测试唤醒成功 " + fmtWakeTime(Date.now() / 1000),
-          });
+        busyWaitMs(15000);
+        try {
+          hmApp.exit();
+        } catch (e) {
+          console.log("exit err " + e);
         }
-        // 无自动退出: 定时器在唤醒会话不工作, 停屏等用户手动划走
       });
     } else {
       // 手动打开: 秒显缓存 + 20s×2 拉实时; 开关是开的状态则顺手续挂闹钟链
@@ -559,20 +561,10 @@ Page({
         });
         return;
       }
-      // 2 分钟后自测唤醒: 区分"创建成功但固件不触发" vs "机制可用"
-      const test = mkAlarm(120, "test");
-      if (test.ok) {
-        setW(this.txt.status, {
-          color: COLOR_OK,
-          text: "已挂09:00·2分钟后自测唤醒",
-        });
-      } else {
-        setW(this.txt.status, {
-          color: COLOR_OK,
-          text:
-            "已挂09:00·" + fmtWakeTime(Date.now() / 1000 + main.delaySec),
-        });
-      }
+      setW(this.txt.status, {
+        color: COLOR_OK,
+        text: "已挂明日09:00·" + fmtWakeTime(Date.now() / 1000 + main.delaySec),
+      });
     } else {
       setW(
         this.txt.status,
