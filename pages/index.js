@@ -126,14 +126,21 @@ function flagWrite(on) {
 let alarmId = 0;
 
 // 挂闹钟并检查返回值 (失败返回 0 或 0xFFFFFFFF); 用 delay 相对秒数调度, 规避 date 绝对时间戳的单位/语义坑
+// 唤醒场景下固件可能对 alarmNew 有限制甚至抛异常 → 必须 try/catch, 不许它杀死 build
 function mkAlarm(delaySec, param) {
-  const id = hmApp.alarmNew({
-    appid: appId,
-    url: "pages/index",
-    file: "pages/index",
-    delay: delaySec,
-    param: param,
-  });
+  let id = 0;
+  try {
+    id = hmApp.alarmNew({
+      appid: appId,
+      url: "pages/index",
+      file: "pages/index",
+      delay: delaySec,
+      param: param,
+    });
+  } catch (e) {
+    console.log("alarmNew threw " + e);
+    return { ok: false, id: 0 };
+  }
   const ok = id !== 0 && id < 4294967290;
   console.log(
     "alarmNew delay=" + delaySec + " param=" + param + " id=" + id + " ok=" + ok
@@ -342,11 +349,15 @@ Page({
     );
 
     if (wakeParam === "daily" || wakeParam === "test") {
-      // 闹钟唤醒: 无条件续挂主链; 震动; 秒显缓存; 短超时拉实时, 渲染完成后才退出
-      armDaily(true);
-      buzz();
+      // 闹钟唤醒: 先渲染缓存和震动(保证可见), 再续挂主链(不许它杀死流程), 最后拉实时
       const isTest = wakeParam === "test";
       this.showCache();
+      buzz();
+      try {
+        armDaily(true);
+      } catch (e) {
+        console.log("rearm threw " + e);
+      }
       this.fetchWithRetry(2, 8000).then(() => {
         if (isTest) {
           setW(this.txt.status, {
@@ -361,7 +372,12 @@ Page({
         }, isTest ? 6000 : 3000);
       });
     } else {
-      // 手动打开: 秒显缓存 + 20s×2 拉实时
+      // 手动打开: 秒显缓存 + 20s×2 拉实时; 开关是开的状态则顺手续挂闹钟链
+      if (flagRead() === true) {
+        try {
+          armDaily(true);
+        } catch (e) {}
+      }
       this.refresh();
     }
   },
