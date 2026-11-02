@@ -218,7 +218,10 @@ export class MessageBuilder extends EventBus {
   disConnect(cb) {
     // logger.debug('app ble disconnect')
     this.sendClose()
-    this.off('message')
+    // 官方 1.0 样例 bug: 类里没有定义 off 方法, 直接调用必抛 TypeError: not a function
+    if (typeof this.off === 'function') {
+      this.off('message')
+    }
     hmBle && hmBle.disConnect()
 
     cb && cb(this)
