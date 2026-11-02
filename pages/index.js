@@ -125,29 +125,6 @@ function flagWrite(on) {
 // ---------- 每日提醒: 闹钟链 (维护在手表端, 状态在手表文件, 均不依赖手机) ----------
 let alarmId = 0;
 
-function nextNineUtc() {
-  // 先按秒算; 若底层 utc 是毫秒会导致结果为13位数, 用当前秒数归一化兜底
-  let nowSec = 0;
-  try {
-    nowSec = Math.floor(Date.now() / 1000);
-  } catch (e) {}
-  let t = 0;
-  try {
-    const tz = hmSensor.createSensor(hmSensor.id.TIME);
-    const tzOff = tz.hour * 3600 + tz.minute * 60 - (tz.utc % 86400);
-    t = Math.floor((tz.utc + tzOff) / 86400) * 86400 + 9 * 3600 - tzOff;
-    // 兼容毫秒型 utc: 除到秒级 (tz.utc 为 ms 时 t 会是 13 位数)
-    while (t > nowSec + 90000 && t > 1e11) t = Math.floor(t / 1000);
-  } catch (e) {
-    t = 0;
-  }
-  // 最终夹紧: 必须是未来 24h 内的秒级时间戳, 否则退回"现在+24h"
-  if (nowSec > 0 && (t < nowSec + 60 || t > nowSec + 200000)) {
-    t = nowSec + 86400;
-  }
-  return t;
-}
-
 // 挂闹钟并检查返回值 (失败返回 0 或 0xFFFFFFFF); 用 delay 相对秒数调度, 规避 date 绝对时间戳的单位/语义坑
 function mkAlarm(delaySec, param) {
   const id = hmApp.alarmNew({
