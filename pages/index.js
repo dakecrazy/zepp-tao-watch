@@ -246,7 +246,7 @@ function fmtCacheTime(ts) {
 // ---------- 震动提醒 ----------
 let vibrate = null;
 
-// scene 0 = 两短震 (同手表消息通知); 规则: start 后必须 stop, 否则下次 start 不震
+// scene 9 = 高强度四连震(1200ms, 同闹钟反馈), 唤醒场景必须醒目; 规则: start 后必须 stop, 否则下次 start 不震
 function buzz() {
   // 唤醒启动瞬间传感器服务可能未就绪: 延迟 600ms 再震, 全程留日志
   setTimeout(() => {
@@ -259,9 +259,9 @@ function buzz() {
       try {
         vibrate.stop();
       } catch (e) {}
-      vibrate.scene = 0;
+      vibrate.scene = 9;
       vibrate.start();
-      console.log("vib start scene=0");
+      console.log("vib start scene=9");
       setTimeout(() => {
         try {
           vibrate.stop();
