@@ -328,7 +328,7 @@ Page({
 
     // 1.0 的 BUTTON 不支持 setProperty 更新文字 → 删除重建
     this.btnCfg = {
-      refresh: { x: 15, y: 318, w: 170, h: 70, size: 28, click: () => this.refresh(false) },
+      refresh: { x: 15, y: 318, w: 170, h: 70, size: 28, click: () => this.refresh() },
       daily: { x: 205, y: 318, w: 170, h: 70, size: 26, click: () => this.toggleDaily() },
     };
 
@@ -342,27 +342,27 @@ Page({
     );
 
     if (wakeParam === "daily" || wakeParam === "test") {
-      // 闹钟唤醒: 无条件续挂主链 (自持, 不依赖手机); 震动两下提示
+      // 闹钟唤醒: 无条件续挂主链; 震动; 秒显缓存; 短超时拉实时, 渲染完成后才退出
       armDaily(true);
       buzz();
-      this.refresh(false)
-        .then(() => {
-          if (wakeParam === "test") {
-            setW(this.txt.status, {
-              color: COLOR_OK,
-              text: "测试唤醒成功 " + fmtWakeTime(Date.now() / 1000),
-            });
-          }
-          setTimeout(() => {
-            try {
-              hmApp.exit();
-            } catch (e) {}
-          }, wakeParam === "test" ? 6000 : 3000);
-        })
-        .catch(() => {});
+      const isTest = wakeParam === "test";
+      this.showCache();
+      this.fetchWithRetry(2, 8000).then(() => {
+        if (isTest) {
+          setW(this.txt.status, {
+            color: COLOR_OK,
+            text: "测试唤醒成功 " + fmtWakeTime(Date.now() / 1000),
+          });
+        }
+        setTimeout(() => {
+          try {
+            hmApp.exit();
+          } catch (e) {}
+        }, isTest ? 6000 : 3000);
+      });
     } else {
-      // 手动打开: 直接拉最新数据 (失败时手机侧回包自带缓存)
-      this.refresh(false).catch(() => {});
+      // 手动打开: 秒显缓存 + 20s×2 拉实时
+      this.refresh();
     }
   },
 
@@ -467,31 +467,65 @@ Page({
     }
   },
 
-  refresh(isRetry) {
-    setW(this.txt.status, { color: COLOR_DIM, text: "拉取链上…" });
-    return req({ method: "GET_DATA" }, DATA_TIMEOUT)
-      .then((resp) => {
+  // 秒显手表缓存 (若有), 返回缓存对象或 null
+  showCache() {
+    const c = cacheLoad();
+    if (c) {
+      this.state.last = {
+        taoValue: c.taoValue,
+        poolPrice: c.poolPrice,
+        price: c.price,
+        height: c.height,
+        steps: "",
+      };
+      this.renderBig();
+    }
+    return c;
+  },
+
+  // N 次尝试的拉取; promise 在最终渲染完成后才 resolve (唤醒退出依赖它, 不与 exit 竞争)
+  fetchWithRetry(left, timeout) {
+    return req({ method: "GET_DATA" }, timeout).then(
+      (resp) => {
         if (resp && resp.ok) {
           this.renderData(resp.data, "实时");
+          return true;
+        }
+        if (left > 0) {
+          return this.fetchWithRetry(left - 1, timeout);
+        }
+        if (resp && resp.last) {
+          this.renderData(resp.last, "缓存");
         } else {
-          if (resp && resp.last) this.renderData(resp.last, "缓存");
           this.renderData(null, null, (resp && resp.error) || "未知");
         }
-      })
-      .catch((e) => {
-        const m = String(e);
-        // 桥超时自动重试一次 (冷启动第二击自动化), 只重试一次防打转
-        if (!isRetry && m.indexOf("Timed out") >= 0) {
-          setW(this.txt.status, { color: COLOR_DIM, text: "桥忙·自动重试…" });
-          setTimeout(() => {
-            try {
-              this.refresh(true);
-            } catch (e2) {}
-          }, 1500);
-          return;
+        return false;
+      },
+      (e) => {
+        if (left > 0) {
+          setW(this.txt.status, {
+            color: COLOR_DIM,
+            text: "桥忙·自动重试…",
+          });
+          return this.fetchWithRetry(left - 1, timeout);
         }
         this.renderData(null, null, bridgeErr(e));
+        return false;
+      }
+    );
+  },
+
+  refresh() {
+    const c = this.showCache();
+    if (c) {
+      setW(this.txt.status, {
+        color: COLOR_DIM,
+        text: "缓存 " + fmtCacheTime(c.ts) + " · 更新中…",
       });
+    } else {
+      setW(this.txt.status, { color: COLOR_DIM, text: "拉取链上…" });
+    }
+    return this.fetchWithRetry(1, 20000);
   },
 
   // 退出前停震 (文档规则: start 后须 stop, 否则下次 start 不震)
