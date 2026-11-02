@@ -9,7 +9,12 @@ App({
   },
   onCreate(options) {
     console.log("app on create invoke");
-    // 闹钟唤醒时 options.param === 'daily'
+    // 闹钟唤醒时 options.param === 'daily'; 打印原始 options 验证 param 是否真的传回
+    try {
+      console.log("launch options=" + JSON.stringify(options));
+    } catch (e) {
+      console.log("launch options unserializable " + e);
+    }
     this.globalData.wakeParam = (options && options.param) || "";
     let appId;
     if (!hmApp.packageInfo) {
