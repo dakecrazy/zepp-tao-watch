@@ -246,31 +246,24 @@ function fmtCacheTime(ts) {
 // ---------- 震动提醒 ----------
 let vibrate = null;
 
-// scene 9 = 高强度四连震(1200ms, 同闹钟反馈), 唤醒场景必须醒目; 规则: start 后必须 stop, 否则下次 start 不震
+// scene 9 = 高强度四连震(1200ms); 不用 setTimeout 延迟——唤醒场景下定时器回调疑似不执行
+// (v1.1.4~1.1.8 的 vib 日志从未出现, 而 buzz 之后的 alarmNew 日志正常), 改为同步直调
 function buzz() {
-  // 唤醒启动瞬间传感器服务可能未就绪: 延迟 600ms 再震, 全程留日志
-  setTimeout(() => {
-    try {
-      console.log("vib id=" + hmSensor.id.VIBRATE);
-      if (!vibrate) {
-        vibrate = hmSensor.createSensor(hmSensor.id.VIBRATE);
-        console.log("vib created");
-      }
-      try {
-        vibrate.stop();
-      } catch (e) {}
-      vibrate.scene = 9;
-      vibrate.start();
-      console.log("vib start scene=9");
-      setTimeout(() => {
-        try {
-          vibrate.stop();
-        } catch (e) {}
-      }, 2000);
-    } catch (e) {
-      console.log("vibrate err " + e);
+  try {
+    console.log("vib id=" + hmSensor.id.VIBRATE);
+    if (!vibrate) {
+      vibrate = hmSensor.createSensor(hmSensor.id.VIBRATE);
+      console.log("vib created");
     }
-  }, 600);
+    try {
+      vibrate.stop();
+    } catch (e) {}
+    vibrate.scene = 9;
+    vibrate.start();
+    console.log("vib start scene=9");
+  } catch (e) {
+    console.log("vibrate err " + e);
+  }
 }
 
 // 挂/撤每日闹钟主链, 返回 {ok, delaySec}
