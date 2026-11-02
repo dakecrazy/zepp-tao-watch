@@ -180,26 +180,90 @@ function fmtWakeTime(utcSec) {
   }
 }
 
+// ---------- 手表端数据缓存: 拉到实时数据就存, 桥/手机连不上时显示缓存 ----------
+const CACHE_PATH = "tao_cache";
+
+function cacheSave(d) {
+  try {
+    const s = JSON.stringify({
+      taoValue: d.taoValue,
+      poolPrice: d.poolPrice,
+      price: d.price,
+      height: d.height,
+      ts: Date.now(),
+    });
+    const fd = hmFS.open(CACHE_PATH, hmFS.O_WRONLY | hmFS.O_CREAT | hmFS.O_TRUNC);
+    if (!fd) return false;
+    const buf = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) buf[i] = s.charCodeAt(i);
+    const r = hmFS.write(fd, buf.buffer, 0, buf.length);
+    hmFS.close(fd);
+    return r >= buf.length;
+  } catch (e) {
+    console.log("cacheSave err " + e);
+    return false;
+  }
+}
+
+function cacheLoad() {
+  try {
+    const fd = hmFS.open(CACHE_PATH, hmFS.O_RDWR | hmFS.O_CREAT);
+    if (!fd) return null;
+    const buf = new Uint8Array(256);
+    const r = hmFS.read(fd, buf.buffer, 0, 256);
+    hmFS.close(fd);
+    if (r < 1) return null;
+    let s = "";
+    for (let i = 0; i < r; i++) s += String.fromCharCode(buf[i]);
+    const d = JSON.parse(s);
+    return d && d.taoValue != null ? d : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function fmtCacheTime(ts) {
+  try {
+    const d = new Date(ts);
+    function p(n) {
+      return n < 10 ? "0" + n : "" + n;
+    }
+    return (
+      p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes())
+    );
+  } catch (e) {
+    return "";
+  }
+}
+
 // ---------- 震动提醒 ----------
 let vibrate = null;
 
 // scene 0 = 两短震 (同手表消息通知); 规则: start 后必须 stop, 否则下次 start 不震
 function buzz() {
-  try {
-    if (!vibrate) vibrate = hmSensor.createSensor(hmSensor.id.VIBRATE);
+  // 唤醒启动瞬间传感器服务可能未就绪: 延迟 600ms 再震, 全程留日志
+  setTimeout(() => {
     try {
-      vibrate.stop();
-    } catch (e) {}
-    vibrate.scene = 0;
-    vibrate.start();
-    setTimeout(() => {
+      console.log("vib id=" + hmSensor.id.VIBRATE);
+      if (!vibrate) {
+        vibrate = hmSensor.createSensor(hmSensor.id.VIBRATE);
+        console.log("vib created");
+      }
       try {
         vibrate.stop();
       } catch (e) {}
-    }, 2000);
-  } catch (e) {
-    console.log("vibrate err " + e);
-  }
+      vibrate.scene = 0;
+      vibrate.start();
+      console.log("vib start scene=0");
+      setTimeout(() => {
+        try {
+          vibrate.stop();
+        } catch (e) {}
+      }, 2000);
+    } catch (e) {
+      console.log("vibrate err " + e);
+    }
+  }, 600);
 }
 
 // 挂/撤每日闹钟主链, 返回 {ok, delaySec}
@@ -360,19 +424,46 @@ Page({
     if (d) {
       this.state.last = d;
       this.renderBig();
-      let sc = COLOR_DIM;
-      if (source === "实时") sc = COLOR_OK;
-      setW(this.txt.status, {
-        color: sc,
-        text:
-          (source ? source + " · " : "") +
-          "#" +
-          (d.height || 0) +
-          (d.steps ? " · " + d.steps : ""),
-      });
+      if (source === "实时") {
+        // 成功拉到实时数据 → 存手表缓存
+        cacheSave(d);
+        setW(this.txt.status, {
+          color: COLOR_OK,
+          text:
+            "实时 · #" +
+            (d.height || 0) +
+            (d.steps ? " · " + d.steps : ""),
+        });
+      } else {
+        setW(this.txt.status, {
+          color: COLOR_DIM,
+          text:
+            (source ? source + " · " : "") +
+            "#" +
+            (d.height || 0) +
+            (d.steps ? " · " + d.steps : ""),
+        });
+      }
     }
     if (err) {
-      setW(this.txt.status, { color: COLOR_ERR, text: "错误: " + err });
+      // 手机/桥连不上 → 回退显示手表端最后一次成功的数据 (标注时间)
+      const c = cacheLoad();
+      if (c) {
+        this.state.last = {
+          taoValue: c.taoValue,
+          poolPrice: c.poolPrice,
+          price: c.price,
+          height: c.height,
+          steps: "",
+        };
+        this.renderBig();
+        setW(this.txt.status, {
+          color: COLOR_DIM,
+          text: "缓存 " + fmtCacheTime(c.ts),
+        });
+      } else {
+        setW(this.txt.status, { color: COLOR_ERR, text: "错误: " + err });
+      }
     }
   },
 
