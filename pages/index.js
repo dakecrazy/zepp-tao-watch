@@ -342,7 +342,9 @@ Page({
     );
 
     if (wakeParam === "daily" || wakeParam === "test") {
-      // 闹钟唤醒: 先渲染缓存和震动(保证可见), 再续挂主链(不许它杀死流程), 最后拉实时
+      // 闹钟唤醒: 先渲染缓存和震动(保证可见), 再续挂主链, 最后拉实时
+      // 实测铁律: 唤醒会话里 setTimeout 回调不执行(定时器全灭) → 不做自动退出,
+      // 余额停屏等用户看完手动划走; 所有必须执行的逻辑一律同步直调
       const isTest = wakeParam === "test";
       this.showCache();
       buzz();
@@ -358,11 +360,7 @@ Page({
             text: "测试唤醒成功 " + fmtWakeTime(Date.now() / 1000),
           });
         }
-        setTimeout(() => {
-          try {
-            hmApp.exit();
-          } catch (e) {}
-        }, isTest ? 6000 : 3000);
+        // 无自动退出: 定时器在唤醒会话不工作, 停屏等用户手动划走
       });
     } else {
       // 手动打开: 秒显缓存 + 20s×2 拉实时; 开关是开的状态则顺手续挂闹钟链
