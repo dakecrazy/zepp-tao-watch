@@ -9,13 +9,22 @@ App({
   },
   onCreate(options) {
     console.log("app on create invoke");
-    // 闹钟唤醒时 options.param === 'daily'; 打印原始 options 验证 param 是否真的传回
+    // 实测(v1.2.1): 固件把 param 作为启动参数本身传回 —— options 是字符串 "test",
+    // 不是官方样例假设的 {param:...} 对象; 两种形态都兼容
     try {
       console.log("launch options=" + JSON.stringify(options));
     } catch (e) {
       console.log("launch options unserializable " + e);
     }
-    this.globalData.wakeParam = (options && options.param) || "";
+    let wp = "";
+    if (options) {
+      if (typeof options === "string") {
+        wp = options;
+      } else if (typeof options.param === "string") {
+        wp = options.param;
+      }
+    }
+    this.globalData.wakeParam = wp;
     let appId;
     if (!hmApp.packageInfo) {
       appId = 662601; // 与 app.json 一致
