@@ -180,6 +180,28 @@ function fmtWakeTime(utcSec) {
   }
 }
 
+// ---------- 震动提醒 ----------
+let vibrate = null;
+
+// scene 0 = 两短震 (同手表消息通知); 规则: start 后必须 stop, 否则下次 start 不震
+function buzz() {
+  try {
+    if (!vibrate) vibrate = hmSensor.createSensor(hmSensor.id.VIBRATE);
+    try {
+      vibrate.stop();
+    } catch (e) {}
+    vibrate.scene = 0;
+    vibrate.start();
+    setTimeout(() => {
+      try {
+        vibrate.stop();
+      } catch (e) {}
+    }, 2000);
+  } catch (e) {
+    console.log("vibrate err " + e);
+  }
+}
+
 // 挂/撤每日闹钟主链, 返回 {ok, delaySec}
 function armDaily(enabled) {
   if (alarmId) {
@@ -256,8 +278,9 @@ Page({
     );
 
     if (wakeParam === "daily" || wakeParam === "test") {
-      // 闹钟唤醒: 无条件续挂主链 (自持, 不依赖手机)
+      // 闹钟唤醒: 无条件续挂主链 (自持, 不依赖手机); 震动两下提示
       armDaily(true);
+      buzz();
       this.refresh(false)
         .then(() => {
           if (wakeParam === "test") {
@@ -378,6 +401,15 @@ Page({
         }
         this.renderData(null, null, bridgeErr(e));
       });
+  },
+
+  // 退出前停震 (文档规则: start 后须 stop, 否则下次 start 不震)
+  onDestroy() {
+    if (vibrate) {
+      try {
+        vibrate.stop();
+      } catch (e) {}
+    }
   },
 
   toggleDaily() {
