@@ -148,8 +148,62 @@ function nextNineUtc() {
   return t;
 }
 
-// 挂闹钟并检查返回值 (alarmNew 失败返回 0, 不检查就是盲报成功)
-// url/file 两个键都发: 1.0 文档示例用 file, option 表写 url, 固件行为未知
+// 挂闹钟并检查返回值 (失败返回 0 或 0xFFFFFFFF); 用 delay 相对秒数调度, 规避 date 绝对时间戳的单位/语义坑
+function mkAlarm(delaySec, param) {
+  const id = hmApp.alarmNew({
+    appid: appId,
+    url: "pages/index",
+    file: "pages/index",
+    delay: delaySec,
+    param: param,
+  });
+  const ok = id !== 0 && id < 4294967290;
+  console.log(
+    "alarmNew delay=" + delaySec + " param=" + param + " id=" + id + " ok=" + ok
+  );
+  return { ok: ok, id: id };
+}
+
+// 距下一班 09:00 的秒数 (夹紧 30..200000)
+function nextNineDelay() {
+  let nowSec = 0;
+  try {
+    nowSec = Math.floor(Date.now() / 1000);
+  } catch (e) {}
+  let t = 0;
+  try {
+    const tz = hmSensor.createSensor(hmSensor.id.TIME);
+    const tzOff = tz.hour * 3600 + tz.minute * 60 - (tz.utc % 86400);
+    t = Math.floor((tz.utc + tzOff) / 86400) * 86400 + 9 * 3600 - tzOff;
+    while (t > nowSec + 90000 && t > 1e11) t = Math.floor(t / 1000); // 毫秒型 utc 归一化
+  } catch (e) {
+    t = 0;
+  }
+  if (nowSec <= 0) return 86400;
+  if (t < nowSec + 60 || t > nowSec + 200000) t = nowSec + 86400;
+  return Math.max(30, Math.min(200000, t - nowSec));
+}
+
+// 到点显示 "HH:MM": 本地墙钟 + delta 分钟, 不依赖传感器 utc 的单位
+function fmtWakeTime(utcSec) {
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const tz = hmSensor.createSensor(hmSensor.id.TIME);
+    const deltaMin = Math.round((utcSec - nowSec) / 60);
+    if (deltaMin < 0 || deltaMin > 200000) return "";
+    const total = (tz.hour * 60 + tz.minute + deltaMin) % 1440;
+    const hh = Math.floor(total / 60);
+    const mm = total % 60;
+    function p(n) {
+      return n < 10 ? "0" + n : "" + n;
+    }
+    return p(hh) + ":" + p(mm);
+  } catch (e) {
+    return "";
+  }
+}
+
+// 挂/撤每日闹钟主链, 返回 {ok, delaySec}
 function armDaily(enabled) {
   if (alarmId) {
     try {
@@ -157,23 +211,11 @@ function armDaily(enabled) {
     } catch (e) {}
     alarmId = 0;
   }
-  if (!enabled) return true;
-  const t = nextNineUtc();
-  if (t <= 0) return false;
-  alarmId = hmApp.alarmNew({
-    appid: appId,
-    url: "pages/index",
-    file: "pages/index",
-    date: t,
-    param: "daily",
-  });
-  console.log("alarmNew id=" + alarmId + " @" + t);
-  // 失败形态: 0 或 0xFFFFFFFF(=-1 的无符号表示)
-  if (alarmId === 0 || alarmId >= 4294967290) {
-    alarmId = 0;
-    return false;
-  }
-  return true;
+  if (!enabled) return { ok: true, delaySec: 0 };
+  const d = nextNineDelay();
+  const r = mkAlarm(d, "daily");
+  if (r.ok) alarmId = r.id;
+  return { ok: r.ok, delaySec: d };
 }
 
 Page({
@@ -236,16 +278,22 @@ Page({
       f === true ? "提醒 ✓" : f === false ? "提醒 ×" : "提醒 ?"
     );
 
-    if (wakeParam === "daily") {
-      // 闹钟唤醒: 文件明确为"关"才不续; 其余(含读取失败)一律续挂 — 链自持不依赖手机
-      if (f !== false) armDaily(true);
+    if (wakeParam === "daily" || wakeParam === "test") {
+      // 闹钟唤醒: 无条件续挂主链 (自持, 不依赖手机)
+      armDaily(true);
       this.refresh(false)
         .then(() => {
+          if (wakeParam === "test") {
+            setW(this.txt.status, {
+              color: COLOR_OK,
+              text: "测试唤醒成功 " + fmtWakeTime(Date.now() / 1000),
+            });
+          }
           setTimeout(() => {
             try {
               hmApp.exit();
             } catch (e) {}
-          }, 3000);
+          }, wakeParam === "test" ? 6000 : 3000);
         })
         .catch(() => {});
     } else {
@@ -359,20 +407,31 @@ Page({
     // 开关真值 = 手表分层持久化 (文件 > SysPro)
     const next = !(flagRead() === true);
     const res = flagWrite(next);
-    const ok = armDaily(next);
+    const main = armDaily(next);
     this.state.daily = next;
     this.mkBtn("daily", next ? "提醒 ✓" : "提醒 ×");
     if (next) {
-      setW(
-        this.txt.status,
-        !ok
-          ? { color: COLOR_ERR, text: "闹钟创建失败(id=0)" }
-          : res.fileOK
-            ? { color: COLOR_OK, text: "每日09:00已挂闹钟" }
-            : res.sysOK
-              ? { color: COLOR_ERR, text: "已挂闹钟·重启手表后需重开" }
-              : { color: COLOR_ERR, text: "已挂闹钟·状态未能保存" }
-      );
+      if (!main.ok) {
+        setW(this.txt.status, {
+          color: COLOR_ERR,
+          text: "闹钟创建失败(0xFFFFFFFF)",
+        });
+        return;
+      }
+      // 2 分钟后自测唤醒: 区分"创建成功但固件不触发" vs "机制可用"
+      const test = mkAlarm(120, "test");
+      if (test.ok) {
+        setW(this.txt.status, {
+          color: COLOR_OK,
+          text: "已挂09:00·2分钟后自测唤醒",
+        });
+      } else {
+        setW(this.txt.status, {
+          color: COLOR_OK,
+          text:
+            "已挂09:00·" + fmtWakeTime(Date.now() / 1000 + main.delaySec),
+        });
+      }
     } else {
       setW(
         this.txt.status,
