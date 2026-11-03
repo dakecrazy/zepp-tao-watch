@@ -5,8 +5,8 @@
     "appName": "TAO监控",
     "appType": "app",
     "version": {
-      "code": 25,
-      "name": "1.3.2"
+      "code": 26,
+      "name": "1.3.3"
     },
     "icon": "icon.png",
     "vender": "nhg",

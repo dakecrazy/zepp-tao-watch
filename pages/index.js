@@ -622,7 +622,7 @@ Page({
       }
       setW(this.txt.status, {
         color: COLOR_OK,
-        text: "已挂明日09:00·" + fmtWakeTime(Date.now() / 1000 + main.delaySec),
+        text: "已挂明日09:00",
       });
     } else {
       setW(
