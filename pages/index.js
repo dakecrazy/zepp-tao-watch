@@ -148,24 +148,25 @@ function mkAlarm(delaySec, param) {
   return { ok: ok, id: id };
 }
 
-// 距下一班 09:00 的秒数 (夹紧 30..200000)
+// 距下一班 09:00 的秒数 (保底 600s 防自激循环)
+// 教训: tz.utc 在该固件单位不可靠(曾为毫秒), 归一化后仍带几分钟级垃圾偏移,
+// 算出的延时可能只有几分钟 → 闹钟自触发循环(9点不响、一小时内连响十次)。
+// 因此只用 Date.now()(实测可靠) + 时钟的 hour/minute 墙钟字段(无单位歧义), 不再碰 tz.utc
 function nextNineDelay() {
   let nowSec = 0;
   try {
     nowSec = Math.floor(Date.now() / 1000);
   } catch (e) {}
-  let t = 0;
+  let wallMin = -1;
   try {
     const tz = hmSensor.createSensor(hmSensor.id.TIME);
-    const tzOff = tz.hour * 3600 + tz.minute * 60 - (tz.utc % 86400);
-    t = Math.floor((tz.utc + tzOff) / 86400) * 86400 + 9 * 3600 - tzOff;
-    while (t > nowSec + 90000 && t > 1e11) t = Math.floor(t / 1000); // 毫秒型 utc 归一化
-  } catch (e) {
-    t = 0;
-  }
-  if (nowSec <= 0) return 86400;
-  if (t < nowSec + 60 || t > nowSec + 200000) t = nowSec + 86400;
-  return Math.max(30, Math.min(200000, t - nowSec));
+    wallMin = tz.hour * 60 + tz.minute;
+  } catch (e) {}
+  if (nowSec <= 0 || wallMin < 0) return 86400;
+  const wallNowSec = wallMin * 60 + (nowSec % 60); // 秒位取自 epoch 秒(与时区无关)
+  let deltaSec = 9 * 3600 - wallNowSec;
+  while (deltaSec <= 120) deltaSec += 86400; // 已过/正处9点(±2分钟) → 明天, 保底>2分钟防即时重触发
+  return Math.max(600, Math.min(200000, deltaSec));
 }
 
 // 到点显示 "HH:MM": 本地墙钟 + delta 分钟, 不依赖传感器 utc 的单位
@@ -272,17 +273,65 @@ function busyWaitMs(ms) {
 }
 
 // 挂/撤每日闹钟主链, 返回 {ok, delaySec}
+// 跨会话取消: 闹钟 id 存文件, 每次先取消上一条再新建——否则每次唤醒各挂一条,
+// 队列积累 N 条同刻闹钟, 每天连环响 N 次
+const ALARM_ID_PATH = "tao_alarm_id";
+
+function alarmIdRead() {
+  try {
+    const fd = hmFS.open(ALARM_ID_PATH, hmFS.O_RDWR | hmFS.O_CREAT);
+    if (!fd) return 0;
+    const buf = new Uint8Array(12);
+    const r = hmFS.read(fd, buf.buffer, 0, 12);
+    hmFS.close(fd);
+    if (r < 1) return 0;
+    let s = "";
+    for (let i = 0; i < r; i++) s += String.fromCharCode(buf[i]);
+    const v = parseInt(s, 10);
+    return isNaN(v) ? 0 : v;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function alarmIdWrite(id) {
+  try {
+    const s = String(id);
+    const fd = hmFS.open(ALARM_ID_PATH, hmFS.O_WRONLY | hmFS.O_CREAT | hmFS.O_TRUNC);
+    if (!fd) return;
+    const buf = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) buf[i] = s.charCodeAt(i);
+    hmFS.write(fd, buf.buffer, 0, buf.length);
+    hmFS.close(fd);
+  } catch (e) {}
+}
+
 function armDaily(enabled) {
+  const stored = alarmIdRead();
+  if (stored > 0 && stored < 4294967290) {
+    try {
+      hmApp.alarmCancel(stored);
+      console.log("cancelled stored alarm " + stored);
+    } catch (e) {}
+  }
   if (alarmId) {
     try {
       hmApp.alarmCancel(alarmId);
     } catch (e) {}
     alarmId = 0;
   }
-  if (!enabled) return { ok: true, delaySec: 0 };
+  if (!enabled) {
+    alarmIdWrite(0);
+    return { ok: true, delaySec: 0 };
+  }
   const d = nextNineDelay();
   const r = mkAlarm(d, "daily");
-  if (r.ok) alarmId = r.id;
+  if (r.ok) {
+    alarmId = r.id;
+    alarmIdWrite(r.id);
+  } else {
+    alarmIdWrite(0);
+  }
   return { ok: r.ok, delaySec: d };
 }
 
@@ -347,14 +396,16 @@ Page({
     );
 
     if (wakeParam === "daily") {
-      // 闹钟唤醒: 秒显缓存 → 震两下 → 续挂主链 → 拉实时 → 停屏15s → 退出
+      // 闹钟唤醒: 秒显缓存 → (开关开启才)震两下+续挂主链 → 拉实时 → 停屏15s → 退出
       // (唤醒会话定时器全灭: 延时用忙等, 关键逻辑全部同步直调)
       this.showCache();
-      buzz();
-      try {
-        armDaily(true);
-      } catch (e) {
-        console.log("rearm threw " + e);
+      if (flagRead() !== false) {
+        buzz();
+        try {
+          armDaily(true);
+        } catch (e) {
+          console.log("rearm threw " + e);
+        }
       }
       this.fetchWithRetry(2, 8000).then(() => {
         busyWaitMs(15000);
